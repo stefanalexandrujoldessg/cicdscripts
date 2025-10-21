@@ -1,0 +1,52 @@
+pipeline {
+    agent any
+    triggers {
+        pollSCM('H/10 * * * *')
+    }
+    environment {
+        META_REPO = "https://github.com/stefanalexandrujoldessg/cis_core_deployment.git"
+        META_BRANCH = "test"
+        CLONE_DIR = "."
+    }
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                echo "🧹 Cleaning workspace..."
+                deleteDir()
+            }
+        }
+
+        stage('Clone Meta Repo') {
+            steps {
+                echo "📥 Cloning meta repo..."
+                withCredentials([usernamePassword(credentialsId: 'githubjenkinstest2', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')]) {
+                    sh '''
+                        # Disable credential helper to avoid old cached tokens
+                        git config --global --unset credential.helper || true
+                        rm -f ~/.git-credentials || true
+
+                        # Clone meta repo directly using PAT
+                        git clone --branch ${META_BRANCH} https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/stefanalexandrujoldessg/cis_core_deployment.git ${CLONE_DIR}
+                    '''
+                }
+            }
+        }
+
+        stage('Load Repo Pipeline') {
+             steps {
+                dir("${CLONE_DIR}") {
+                    script {
+                        def pipelineFile = 'Jenkinsfile'
+                        if (fileExists(pipelineFile)) {
+                            echo "📄 Found Jenkinsfile in repo. Loading and executing..."
+                            load(pipelineFile)
+                        } else {
+                            echo "⚠️ No Jenkinsfile found in repo."
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+//Cel embedizat trebuie sa se afle in repoul clonat in acest script
