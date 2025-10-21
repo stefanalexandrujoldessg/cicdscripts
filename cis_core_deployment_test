@@ -1,0 +1,121 @@
+pipeline {
+    agent any
+    triggers {
+        pollSCM('H/10 * * * *')
+    }
+    environment {
+        DOCKER_COMPOSE_CMD = "docker compose"
+        HEALTHCHECK_URL = "http://localhost:8080/health" // adjust if needed
+        HEALTH_TIMEOUT = 60
+        META_REPO = "https://github.com/stefanalexandrujoldessg/cis_core_deployment.git"
+        META_BRANCH = "test"
+        CLONE_DIR = "." // current workspace
+        NETWORK_NAME = "deployment_it1_net"
+    }
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                echo "🧹 Cleaning workspace..."
+                deleteDir()
+            }
+        }
+
+        stage('Checkout Meta Repo') {
+            steps {
+                echo "📥 Cloning meta repo..."
+                withCredentials([usernamePassword(credentialsId: 'githubjenkinstest2', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')]) {
+                    sh '''
+                        # Directly use PAT in URL, avoid credential helper
+                        REPO_URL_WITH_PAT="https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/stefanalexandrujoldessg/cis_core_deployment.git"
+                        git clone --branch ${META_BRANCH} $REPO_URL_WITH_PAT ${CLONE_DIR}
+                    '''
+                }
+            }
+        }
+
+        stage('Init & Update Submodules') {
+            steps {
+                echo "🔗 Initializing and updating submodules..."
+                withCredentials([usernamePassword(credentialsId: 'githubjenkinstest2', usernameVariable: 'GITHUB_USER', passwordVariable: 'GITHUB_TOKEN')]) {
+                    sh '''
+                        # Only proceed if submodules exist
+                        if [ -f .gitmodules ]; then
+                            # Rewrite .gitmodules URLs to include PAT directly
+                            sed -i "s#https://github.com/#https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com/#g" .gitmodules
+
+                            # Sync and update submodules
+                            git submodule sync
+                            git submodule update --init --recursive --remote
+                        else
+                            echo "No submodules found."
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('Create Docker Network') {
+            steps {
+                sh '''
+                    if ! docker network ls --format "{{.Name}}" | grep -wq "$NETWORK_NAME"; then
+                        echo "Network $NETWORK_NAME not found, creating it..."
+                        docker network create $NETWORK_NAME
+                    else
+                        echo "Network $NETWORK_NAME already exists."
+                    fi
+                '''
+            }
+        }
+
+        stage('Build & Deploy Docker Compose') {
+            steps {
+                echo "🔍 Checking for docker-compose file at root..."
+                script {
+                    def composeFile = ''
+                    if (fileExists('docker-compose.yml')) {
+                        composeFile = 'docker-compose.yml'
+                    } else if (fileExists('docker-compose.yaml')) {
+                        composeFile = 'docker-compose.yaml'
+                    }
+
+                    if (composeFile) {
+                        echo "📦 Found docker-compose file: ${composeFile}"
+                        sh """
+                            ${DOCKER_COMPOSE_CMD} -f ${composeFile} up -d --build
+                        """
+                    } else {
+                        echo "⏭️ No docker-compose file found at root, skipping..."
+                    }
+                }
+            }
+        }
+
+        stage('Health Check') {
+            steps {
+                echo "✅ Skipping health check stage (implement if needed)"
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "📋 Docker status overview:"
+            sh 'docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+
+            echo "⚠️ Last 100 logs of all containers:"
+            script {
+                def containers = sh(script: 'docker ps -q', returnStdout: true).trim().split("\n")
+                for (container in containers) {
+                    if (container) {
+                        echo "---- Logs for container ${container} ----"
+                        sh "docker logs --tail 100 ${container} || true"
+                    }
+                }
+            }
+        }
+
+        failure {
+            echo "❌ Pipeline failed"
+        }
+    }
+}
